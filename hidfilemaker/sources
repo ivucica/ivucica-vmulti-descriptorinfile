@@ -1,0 +1,22 @@
+TARGETNAME=hidfilemaker
+TARGETTYPE=PROGRAM
+USE_MSVCRT=1
+USE_DDK=1
+
+TARGETLIBS=$(SDK_LIB_PATH)\hid.lib \
+           $(SDK_LIB_PATH)\setupapi.lib \
+           $(SDK_LIB_PATH)\comdlg32.lib
+           
+SOURCES=hidfilemaker.c hidfilemaker.rc
+
+INCLUDES=$(INCLUDES);..\sys;..\inc;$(DDK_INC_PATH);$(BASEDIR)/inc/wdf/kmdf/1.9
+
+UMTYPE=console
+UMBASE=0x400000
+
+TARGET_DESTINATION=bin
+
+_NT_TARGET_VERSION= $(_NT_TARGET_VERSION_WINXP)
+
+
+
