@@ -2,4 +2,5 @@ DIRS= \
      hidmapper \
      sys       \
      client    \
-     test
+     test      \
+     hidfilemaker

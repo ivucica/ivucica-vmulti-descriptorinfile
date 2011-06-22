@@ -7,6 +7,7 @@
 ULONG VMultiDebugLevel      = 100;
 ULONG VMultiDebugCatagories = DBG_INIT || DBG_PNP || DBG_IOCTL;
 
+#define MIN(x,y) ((x) < (y) ? (x) : (y)) // TODO: DDK must have this defined somewhere, let's use that
 
 NTSTATUS
 DriverEntry (
@@ -420,6 +421,94 @@ VMultiEvtInternalDeviceControl(
 }
 
 NTSTATUS
+VMultiGetHidDescriptorFromFile(
+    IN WDFDEVICE Device,
+    IN WDFREQUEST Request,
+    OUT PHID_DESCRIPTOR HidDescriptor
+    )
+{
+    WCHAR*                          fileName = L"C:\\vmulti.hid";
+    UNICODE_STRING                  unicodeFileName = {0};
+    OBJECT_ATTRIBUTES               oa = {0};
+    
+    HANDLE                          fileHandle;
+    NTSTATUS                        status = STATUS_SUCCESS;
+    IO_STATUS_BLOCK                 iostatus = {0};
+    
+    UCHAR                           descriptorSize = sizeof(HID_DESCRIPTOR);
+    PVOID                           buffer;
+    USHORT                          bufferSize;
+    
+    //open data file if it exists
+    RtlInitUnicodeString(&unicodeFileName, fileName);
+    InitializeObjectAttributes(&oa, 
+                               &unicodeFileName,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, 
+                               NULL, 
+                               NULL);
+    
+    status = ZwCreateFile(&fileHandle,                  //OUT PHANDLE            FileHandle
+                          GENERIC_READ,                 //IN  ACCESS_MASK        DesiredAccess
+                          &oa,                          //IN  POBJECT_ATTRIBUTES ObjectAttributes
+                          &iostatus,                    //OUT PIO_STATUS_BLOCK   IoStatusBlock
+                          NULL,                         //IN  PLARGE_INTEGER     AllocationSize    opt
+                          0,                            //IN  ULONG              FileAttributes
+                          FILE_SHARE_READ,              //IN  ULONG              ShareAccess 
+                          FILE_OPEN,                    //IN  ULONG              CreateDisposition
+                          FILE_SYNCHRONOUS_IO_NONALERT, //IN  ULONG              CreateOptions
+                          NULL,                         //IN  PVOID              EaBuffer          opt
+                          0                             //IN  ULONG              EaLength
+                          );
+    
+    if(!NT_SUCCESS(status))
+    {
+        return status;
+    }
+    
+    status = ZwReadFile(fileHandle,             //IN  HANDLE           FileHandle,
+                        NULL,                   //IN  HANDLE           Event         OPTIONAL
+                        NULL,                   //IN  PIO_APC_ROUTINE  ApcRoutine    OPTIONAL
+                        NULL,                   //IN  PVOID            ApcContext    OPTIONAL
+                        &iostatus,              //OUT PIO_STATUS_BLOCK IoStatusBlock
+                        &descriptorSize,        //OUT PVOID            Buffer
+                        sizeof(descriptorSize), //IN  ULONG            Length
+                        NULL,                   //IN  PLARGE_INTEGER   ByteOffset    OPTIONAL
+                        NULL                    //IN  PULONG           Key           OPTIONAL
+                        );
+    if(!NT_SUCCESS(status))
+    {
+        return status;
+    }
+
+    HidDescriptor->bLength = descriptorSize;
+    buffer = ((PCHAR)HidDescriptor) + sizeof(descriptorSize);
+    
+    // amount that we'll read is the smaller one of:  
+    // * the size read from file and 
+    // * the amount we can actually stor.
+    // that is reduced by what we have already read
+    bufferSize = MIN(sizeof(*HidDescriptor), descriptorSize) - sizeof(descriptorSize); 
+    
+    status = ZwReadFile(fileHandle,            //IN  HANDLE           FileHandle,
+                        NULL,                  //IN  HANDLE           Event         OPTIONAL
+                        NULL,                  //IN  PIO_APC_ROUTINE  ApcRoutine    OPTIONAL
+                        NULL,                  //IN  PVOID            ApcContext    OPTIONAL
+                        &iostatus,             //OUT PIO_STATUS_BLOCK IoStatusBlock
+                        buffer,                //OUT PVOID            Buffer
+                        bufferSize,            //IN  ULONG            Length
+                        NULL,                  //IN  PLARGE_INTEGER   ByteOffset    OPTIONAL
+                        NULL                   //IN  PULONG           Key           OPTIONAL
+                        );
+
+    // if we had something else to read here, we'd first 
+    // skip (descriptorSize - bufferSize) bytes
+    
+    ZwClose(fileHandle);
+    
+    return status;
+}
+
+NTSTATUS
 VMultiGetHidDescriptor(
     IN WDFDEVICE Device,
     IN WDFREQUEST Request
@@ -428,6 +517,9 @@ VMultiGetHidDescriptor(
     NTSTATUS            status = STATUS_SUCCESS;
     size_t              bytesToCopy = 0;
     WDFMEMORY           memory;
+    const HID_DESCRIPTOR*descriptorToUse;
+    HID_DESCRIPTOR      customHidDescriptor = {0};
+    
 
     UNREFERENCED_PARAMETER(Device);
 
@@ -454,9 +546,23 @@ VMultiGetHidDescriptor(
     }
 
     //
+    // If the HID descriptor file exists, read the
+    // descriptor from it. If it does not, then
     // Use hardcoded "HID Descriptor" 
     //
-    bytesToCopy = DefaultHidDescriptor.bLength;
+    status = VMultiGetHidDescriptorFromFile(Device, Request, &customHidDescriptor);
+    if(!NT_SUCCESS(status))
+    {
+        descriptorToUse = &DefaultHidDescriptor;
+    }
+    else
+    {
+        descriptorToUse = &customHidDescriptor;
+    }
+    
+    // after determining which descriptor to use, 
+    // return the info to OS
+    bytesToCopy = descriptorToUse->bLength;
 
     if (bytesToCopy == 0) 
     {
@@ -470,7 +576,7 @@ VMultiGetHidDescriptor(
     
     status = WdfMemoryCopyFromBuffer(memory,
                             0, // Offset
-                            (PVOID) &DefaultHidDescriptor,
+                            (PVOID) descriptorToUse,
                             bytesToCopy);
 
     if (!NT_SUCCESS(status)) 
