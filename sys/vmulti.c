@@ -427,7 +427,7 @@ VMultiGetHidDescriptorFromFile(
     OUT PHID_DESCRIPTOR HidDescriptor
     )
 {
-    WCHAR*                          fileName = L"C:\\vmulti.hid";
+    WCHAR*                          fileName = L"\\??\\C:\\vmulti.hid";
     UNICODE_STRING                  unicodeFileName = {0};
     OBJECT_ATTRIBUTES               oa = {0};
     
@@ -439,6 +439,9 @@ VMultiGetHidDescriptorFromFile(
     PVOID                           buffer;
     USHORT                          bufferSize;
     
+    // for more info on opening file, see example:
+    // <ddk>/src/input/vserial/utils.c
+
     //open data file if it exists
     RtlInitUnicodeString(&unicodeFileName, fileName);
     InitializeObjectAttributes(&oa, 
@@ -465,6 +468,7 @@ VMultiGetHidDescriptorFromFile(
         return status;
     }
     
+    // first, read the descriptor size:
     status = ZwReadFile(fileHandle,             //IN  HANDLE           FileHandle,
                         NULL,                   //IN  HANDLE           Event         OPTIONAL
                         NULL,                   //IN  PIO_APC_ROUTINE  ApcRoutine    OPTIONAL
@@ -477,18 +481,22 @@ VMultiGetHidDescriptorFromFile(
                         );
     if(!NT_SUCCESS(status))
     {
+        // TODO: close fileHandle
         return status;
     }
 
+    // buffer is inside HidDescriptor, just after bLength.
     HidDescriptor->bLength = descriptorSize;
     buffer = ((PCHAR)HidDescriptor) + sizeof(descriptorSize);
     
     // amount that we'll read is the smaller one of:  
     // * the size read from file and 
-    // * the amount we can actually stor.
-    // that is reduced by what we have already read
+    // * the amount we can actually store.
+    // that amount is, then, reduced by what we have already read.
     bufferSize = MIN(sizeof(*HidDescriptor), descriptorSize) - sizeof(descriptorSize); 
     
+    // perform the read into buffer; note that this is actually the
+    // variable called 'HidDescriptor'.
     status = ZwReadFile(fileHandle,            //IN  HANDLE           FileHandle,
                         NULL,                  //IN  HANDLE           Event         OPTIONAL
                         NULL,                  //IN  PIO_APC_ROUTINE  ApcRoutine    OPTIONAL
