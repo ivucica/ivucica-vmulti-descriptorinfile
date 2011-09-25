@@ -1,3 +1,4 @@
+@echo off
 :: setup separate object root
 
 set separate_object_root=TRUE
@@ -24,7 +25,6 @@ build -wgc
 :: extra copy coinstaller from redist
 copy %BASEDIR%\redist\wdf\x86\WdfCoInstaller01009.dll bin\
 
-echo off
 :: create bat file for easier installation of driver
 echo %BASEDIR%\tools\devcon\i386\devcon.exe install vmulti.inf HID\vmulti > bin\install_driver.bat
 
