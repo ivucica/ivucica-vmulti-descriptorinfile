@@ -481,7 +481,7 @@ VMultiGetHidDescriptorFromFile(
                         );
     if(!NT_SUCCESS(status))
     {
-        // TODO: close fileHandle
+        ZwClose(fileHandle);
         return status;
     }
 
@@ -489,11 +489,15 @@ VMultiGetHidDescriptorFromFile(
     HidDescriptor->bLength = descriptorSize;
     buffer = ((PCHAR)HidDescriptor) + sizeof(descriptorSize);
     
-    // amount that we'll read is the smaller one of:  
-    // * the size read from file and 
-    // * the amount we can actually store.
-    // that amount is, then, reduced by what we have already read.
-    bufferSize = MIN(sizeof(*HidDescriptor), descriptorSize) - sizeof(descriptorSize); 
+    // we can't read more than we can actually store
+    if(descriptorSize > sizeof(*HidDescriptor))
+    {
+        ZwClose(fileHandle);
+        return STATUS_BUFFER_OVERFLOW;
+    }
+
+    // how much data do we have remaining to read?
+    bufferSize = descriptorSize - sizeof(descriptorSize); 
     
     // perform the read into buffer; note that this is actually the
     // variable called 'HidDescriptor'.
@@ -507,9 +511,6 @@ VMultiGetHidDescriptorFromFile(
                         NULL,                  //IN  PLARGE_INTEGER   ByteOffset    OPTIONAL
                         NULL                   //IN  PULONG           Key           OPTIONAL
                         );
-
-    // if we had something else to read here, we'd first 
-    // skip (descriptorSize - bufferSize) bytes
     
     ZwClose(fileHandle);
     
@@ -566,6 +567,8 @@ VMultiGetHidDescriptor(
     else
     {
         descriptorToUse = &customHidDescriptor;
+        VMultiPrint(DEBUG_LEVEL_INFO, DBG_INIT,
+            "Using HID descriptor from file; size: %d\n", descriptorToUse->bLength);
     }
     
     // after determining which descriptor to use, 
@@ -574,11 +577,9 @@ VMultiGetHidDescriptor(
 
     if (bytesToCopy == 0) 
     {
-        status = STATUS_INVALID_DEVICE_STATE;
-
         VMultiPrint(DEBUG_LEVEL_ERROR, DBG_IOCTL,
-            "DefaultHidDescriptor is zero, 0x%x\n", status);
-
+            "HidDescriptor is zero-length, 0x%x\n", status);
+        status = STATUS_INVALID_DEVICE_STATE;
         return status;        
     }
     
@@ -591,6 +592,8 @@ VMultiGetHidDescriptor(
     {
         VMultiPrint(DEBUG_LEVEL_ERROR, DBG_IOCTL,
             "WdfMemoryCopyFromBuffer failed 0x%x\n", status);
+        if(status == 0xc0000206)
+            VMultiPrint(DEBUG_LEVEL_ERROR, DBG_IOCTL, "(Invalid attempt to copy %d bytes\n", bytesToCopy);
 
         return status;
     }
@@ -607,6 +610,163 @@ VMultiGetHidDescriptor(
 }
 
 NTSTATUS
+VMultiGetReportDescriptorFromFile(
+    IN WDFDEVICE Device,
+    IN WDFREQUEST Request,
+    WDFMEMORY Memory
+    )
+{
+    WCHAR*                          fileName = L"\\??\\C:\\vmulti.hid";
+    UNICODE_STRING                  unicodeFileName = {0};
+    OBJECT_ATTRIBUTES               oa = {0};
+    
+    HANDLE                          fileHandle;
+    NTSTATUS                        status = STATUS_SUCCESS;
+    IO_STATUS_BLOCK                 iostatus = {0};
+    
+    UCHAR                           descriptorSize = sizeof(HID_DESCRIPTOR);
+    PVOID                           buffer;
+    USHORT                          bufferSize;
+
+    HID_DESCRIPTOR                    hidDescriptor;
+    PHID_REPORT_DESCRIPTOR            reportDescriptor;
+    
+    // for more info on opening file, see example:
+    // <ddk>/src/input/vserial/utils.c
+
+    //open data file if it exists
+    RtlInitUnicodeString(&unicodeFileName, fileName);
+    InitializeObjectAttributes(&oa, 
+                               &unicodeFileName,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, 
+                               NULL, 
+                               NULL);
+    
+    status = ZwCreateFile(&fileHandle,                  //OUT PHANDLE            FileHandle
+                          GENERIC_READ,                 //IN  ACCESS_MASK        DesiredAccess
+                          &oa,                          //IN  POBJECT_ATTRIBUTES ObjectAttributes
+                          &iostatus,                    //OUT PIO_STATUS_BLOCK   IoStatusBlock
+                          NULL,                         //IN  PLARGE_INTEGER     AllocationSize    opt
+                          0,                            //IN  ULONG              FileAttributes
+                          FILE_SHARE_READ,              //IN  ULONG              ShareAccess 
+                          FILE_OPEN,                    //IN  ULONG              CreateDisposition
+                          FILE_SYNCHRONOUS_IO_NONALERT, //IN  ULONG              CreateOptions
+                          NULL,                         //IN  PVOID              EaBuffer          opt
+                          0                             //IN  ULONG              EaLength
+                          );
+    
+    if(!NT_SUCCESS(status))
+    {
+        return status;
+    }
+    
+    // first, read the descriptor size:
+    status = ZwReadFile(fileHandle,             //IN  HANDLE           FileHandle,
+                        NULL,                   //IN  HANDLE           Event         OPTIONAL
+                        NULL,                   //IN  PIO_APC_ROUTINE  ApcRoutine    OPTIONAL
+                        NULL,                   //IN  PVOID            ApcContext    OPTIONAL
+                        &iostatus,              //OUT PIO_STATUS_BLOCK IoStatusBlock
+                        &descriptorSize,        //OUT PVOID            Buffer
+                        sizeof(descriptorSize), //IN  ULONG            Length
+                        NULL,                   //IN  PLARGE_INTEGER   ByteOffset    OPTIONAL
+                        NULL                    //IN  PULONG           Key           OPTIONAL
+                        );
+    if(!NT_SUCCESS(status))
+    {
+        ZwClose(fileHandle);
+        return status;
+    }
+
+    // buffer is inside HidDescriptor, just after bLength.
+    hidDescriptor.bLength = descriptorSize;
+    buffer = ((PCHAR)&hidDescriptor) + sizeof(descriptorSize);
+    
+    // we can't read more than we can actually store
+    if(descriptorSize > sizeof(hidDescriptor))
+    {
+        ZwClose(fileHandle);
+        return STATUS_BUFFER_OVERFLOW;
+    }
+
+    // how much data do we have remaining to read?
+    bufferSize = descriptorSize - sizeof(descriptorSize); 
+    
+    // perform the read into buffer; note that this is actually the
+    // variable called 'HidDescriptor'.
+    status = ZwReadFile(fileHandle,            //IN  HANDLE           FileHandle,
+                        NULL,                  //IN  HANDLE           Event         OPTIONAL
+                        NULL,                  //IN  PIO_APC_ROUTINE  ApcRoutine    OPTIONAL
+                        NULL,                  //IN  PVOID            ApcContext    OPTIONAL
+                        &iostatus,             //OUT PIO_STATUS_BLOCK IoStatusBlock
+                        buffer,                //OUT PVOID            Buffer
+                        bufferSize,            //IN  ULONG            Length
+                        NULL,                  //IN  PLARGE_INTEGER   ByteOffset    OPTIONAL
+                        NULL                   //IN  PULONG           Key           OPTIONAL
+                        );
+
+    
+    // now we know how much we have to read.
+    // read stuff in.
+    // FIXME: we can ZwReadFile() directly into WDFMEMORY:
+    /*
+To use the hMemory's buffer in your ZwReadFile call WdfMemoryGetBuffer to get 
+the underlying C pointer and you can pass it directly.  OR, you could create a 
+remote io target intead of using fileHandle (open a target by name) and then you 
+can use the WDFMEMORY directly in the read call.
+    */
+
+    bufferSize = hidDescriptor.DescriptorList[0].wReportLength;
+    reportDescriptor = (PHID_REPORT_DESCRIPTOR) ExAllocatePoolWithTag(NonPagedPool, bufferSize, 'RDsc');
+    if(!reportDescriptor)
+    {
+        ZwClose(fileHandle);
+        return STATUS_NO_MEMORY;
+    }
+    status = ZwReadFile(fileHandle,            //IN  HANDLE           FileHandle,
+                        NULL,                  //IN  HANDLE           Event         OPTIONAL
+                        NULL,                  //IN  PIO_APC_ROUTINE  ApcRoutine    OPTIONAL
+                        NULL,                  //IN  PVOID            ApcContext    OPTIONAL
+                        &iostatus,             //OUT PIO_STATUS_BLOCK IoStatusBlock
+                        reportDescriptor,      //OUT PVOID            Buffer
+                        bufferSize,            //IN  ULONG            Length
+                        NULL,                  //IN  PLARGE_INTEGER   ByteOffset    OPTIONAL
+                        NULL                   //IN  PULONG           Key           OPTIONAL
+                        );
+
+    if(!NT_SUCCESS(status))
+    {
+        ExFreePool(reportDescriptor);
+        ZwClose(fileHandle);
+        return status;
+    }
+    
+    // Copy buffer to WDF memory
+    status = WdfMemoryCopyFromBuffer(Memory,
+                            0,
+                            (PVOID) reportDescriptor,
+                            bufferSize);
+    if(!NT_SUCCESS(status))
+    {
+        ExFreePool(reportDescriptor);
+        ZwClose(fileHandle);
+        return status;
+    }
+
+    VMultiPrint(DEBUG_LEVEL_INFO, DBG_INIT,
+        "Using report descriptor from file, for report descriptor; size: %d\n", bufferSize);
+
+
+    // Report copied bytes
+    WdfRequestSetInformation(Request, bufferSize);
+
+    // Close file and free memory
+    ZwClose(fileHandle);
+    ExFreePool(reportDescriptor);
+    
+    return status;
+}
+
+NTSTATUS
 VMultiGetReportDescriptor(
     IN WDFDEVICE Device,
     IN WDFREQUEST Request
@@ -615,6 +775,8 @@ VMultiGetReportDescriptor(
     NTSTATUS            status = STATUS_SUCCESS;
     ULONG_PTR           bytesToCopy;
     WDFMEMORY           memory;
+    const HID_DESCRIPTOR*hidDescriptorToUse;
+    HID_DESCRIPTOR      customHidDescriptor = {0};
 
     UNREFERENCED_PARAMETER(Device);
 
@@ -640,28 +802,59 @@ VMultiGetReportDescriptor(
     }
 
     //
+    // If the HID descriptor file exists, read the
+    // descriptor from it. If it does not, then
     // Use hardcoded Report descriptor
     //
-    bytesToCopy = DefaultHidDescriptor.DescriptorList[0].wReportLength;
+    status = VMultiGetHidDescriptorFromFile(Device, Request, &customHidDescriptor);
+    if(!NT_SUCCESS(status))
+    {
+        hidDescriptorToUse = &DefaultHidDescriptor;
+    }
+    else
+    {
+        hidDescriptorToUse = &customHidDescriptor;
+        VMultiPrint(DEBUG_LEVEL_INFO, DBG_INIT,
+            "Using report descriptor from file; size: %d\n", hidDescriptorToUse->DescriptorList[0].wReportLength);
+    }
+
+    bytesToCopy = hidDescriptorToUse->DescriptorList[0].wReportLength;
 
     if (bytesToCopy == 0) 
     {
         status = STATUS_INVALID_DEVICE_STATE;
-
         VMultiPrint(DEBUG_LEVEL_ERROR, DBG_IOCTL,
-            "DefaultHidDescriptor's reportLength is zero, 0x%x\n", status);
-
+            "HidDescriptor's reportLength is zero, 0x%x\n", status);
         return status;        
     }
-    
+
+    if(hidDescriptorToUse != &DefaultHidDescriptor)
+    {
+        // read report descriptor from file
+
+        status = VMultiGetReportDescriptorFromFile(Device, Request, memory);
+        if(!NT_SUCCESS(status))
+        {
+            VMultiPrint(DEBUG_LEVEL_ERROR, DBG_IOCTL,
+                "Read HidDescriptor from file, then failed reading ReportDescriptor from file, 0x%x\n", status);
+            status = STATUS_INVALID_DEVICE_STATE;    
+            return status;
+        }
+        return status;
+    }
+
+    // still here? use default report descriptor
     status = WdfMemoryCopyFromBuffer(memory,
                             0,
                             (PVOID) DefaultReportDescriptor,
                             bytesToCopy);
+    VMultiPrint(DEBUG_LEVEL_INFO, DBG_IOCTL, "Copied default report descriptor\n");
     if (!NT_SUCCESS(status)) 
     {
         VMultiPrint(DEBUG_LEVEL_ERROR, DBG_IOCTL,
             "WdfMemoryCopyFromBuffer failed 0x%x\n", status);
+        if(status == 0xc0000206)
+            VMultiPrint(DEBUG_LEVEL_ERROR, DBG_IOCTL, "(Invalid attempt to copy %d bytes)\n", bytesToCopy);
 
         return status;
     }
